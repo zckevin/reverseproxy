@@ -4,22 +4,30 @@
 
 // HTTP reverse proxy handler
 
-package httputil
+package reverseproxy
 
 import (
+	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
-	"internal/x/net/http/httpguts"
+	"golang.org/x/net/http/httpguts"
 )
+
+type CodeInjector struct {
+	Payload []byte
+	Marker  *regexp.Regexp
+}
 
 // ReverseProxy is an HTTP Handler that takes an incoming request and
 // sends it to another server, proxying the response back to the
@@ -77,6 +85,8 @@ type ReverseProxy struct {
 	// If nil, the default is to log the provided error and return
 	// a 502 Status Bad Gateway response.
 	ErrorHandler func(http.ResponseWriter, *http.Request, error)
+
+	Injector *CodeInjector
 }
 
 // A BufferPool is an interface for getting and returning temporary
@@ -296,7 +306,19 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	rw.WriteHeader(res.StatusCode)
 
-	err = p.copyResponse(rw, res.Body, p.flushInterval(req, res))
+	body := res.Body
+	needInjection := false
+	// if res.Header.Get("Content-Encoding") == "gzip" {
+	if res.Header.Get("_gziped_html") == "1" {
+		needInjection = true
+		body, err = gzip.NewReader(body)
+		defer body.Close()
+		if err != nil {
+			p.getErrorHandler()(rw, outreq, err)
+			return
+		}
+	}
+	err = p.copyResponse(rw, body, p.flushInterval(req, res), needInjection)
 	if err != nil {
 		defer res.Body.Close()
 		// Since we're streaming the response, if we run into an error all we can do
@@ -381,7 +403,7 @@ func (p *ReverseProxy) flushInterval(req *http.Request, res *http.Response) time
 	return p.FlushInterval
 }
 
-func (p *ReverseProxy) copyResponse(dst io.Writer, src io.Reader, flushInterval time.Duration) error {
+func (p *ReverseProxy) copyResponse(dst io.Writer, src io.Reader, flushInterval time.Duration, needInjection bool) error {
 	if flushInterval != 0 {
 		if wf, ok := dst.(writeFlusher); ok {
 			mlw := &maxLatencyWriter{
@@ -403,23 +425,51 @@ func (p *ReverseProxy) copyResponse(dst io.Writer, src io.Reader, flushInterval 
 		buf = p.BufferPool.Get()
 		defer p.BufferPool.Put(buf)
 	}
-	_, err := p.copyBuffer(dst, src, buf)
+	_, err := p.copyBuffer(dst, src, buf, needInjection)
 	return err
 }
 
 // copyBuffer returns any write errors or non-EOF read errors, and the amount
 // of bytes written.
-func (p *ReverseProxy) copyBuffer(dst io.Writer, src io.Reader, buf []byte) (int64, error) {
+func (p *ReverseProxy) copyBuffer(dst io.Writer, src io.Reader, buf []byte, needInjection bool) (int64, error) {
 	if len(buf) == 0 {
 		buf = make([]byte, 32*1024)
 	}
+
+	// marker := regexp.MustCompile(`<head>`)
+
 	var written int64
+
+	firstRead := true
+	headBuf := make([]byte, 512)
+
 	for {
-		nr, rerr := src.Read(buf)
+		var nr int
+		var rerr error
+
+		if firstRead && needInjection {
+			nr, rerr = io.ReadFull(src, headBuf)
+		} else {
+			nr, rerr = src.Read(buf)
+		}
 		if rerr != nil && rerr != io.EOF && rerr != context.Canceled {
 			p.logf("httputil: ReverseProxy read error during body copy: %v", rerr)
 		}
 		if nr > 0 {
+			if firstRead && needInjection {
+				loc := p.Injector.Marker.FindIndex(headBuf)
+				if loc == nil {
+					log.Println("marker not found in html", string(headBuf))
+					return written, errors.New("marker not found in html")
+				}
+				injectPoint := loc[1]
+				counter := 0
+				counter += copy(buf[counter:], headBuf[:injectPoint])
+				counter += copy(buf[counter:], p.Injector.Payload)
+				counter += copy(buf[counter:], headBuf[injectPoint:])
+				nr += len(p.Injector.Payload)
+			}
+
 			nw, werr := dst.Write(buf[:nr])
 			if nw > 0 {
 				written += int64(nw)
@@ -436,6 +486,9 @@ func (p *ReverseProxy) copyBuffer(dst io.Writer, src io.Reader, buf []byte) (int
 				rerr = nil
 			}
 			return written, rerr
+		}
+		if firstRead {
+			firstRead = false
 		}
 	}
 }
