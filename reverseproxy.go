@@ -436,10 +436,7 @@ func (p *ReverseProxy) copyBuffer(dst io.Writer, src io.Reader, buf []byte, need
 		buf = make([]byte, 32*1024)
 	}
 
-	// marker := regexp.MustCompile(`<head>`)
-
 	var written int64
-
 	firstRead := true
 	headBuf := make([]byte, 512)
 
