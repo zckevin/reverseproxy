@@ -13,7 +13,7 @@ import (
 	"time"
 	"net"
 
-	rp "github.com/zckevin/reverseproxy"
+	rp "github.com/zckevin/reverseproxy/lib"
 )
 
 func NewReverseProxy(bindAddr, listenPort, socks5Addr, payloadPath string) (*rp.ReverseProxy, error) {

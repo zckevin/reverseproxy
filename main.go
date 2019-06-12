@@ -15,7 +15,7 @@ limitations under the License.
 */
 package main
 
-import "github.com/zckevin/reverseproxy/cmd/cmd"
+import "github.com/zckevin/reverseproxy/cmd"
 
 func main() {
   cmd.Execute()
