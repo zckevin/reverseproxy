@@ -76,6 +76,7 @@ func NewReverseProxy(bindAddr, listenPort, socks5Addr, payloadPath string) (*rp.
 				resp.Header.Del("Content-Encoding")
 				resp.Header.Add("_gziped_html", "1")
 			}
+			resp.Header.Add("Access-Control-Allow-Origin", "*")
 
 			log.Println("<<<", resp)
 			return nil
